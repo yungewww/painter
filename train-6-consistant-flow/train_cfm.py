@@ -41,7 +41,7 @@ D_MODEL     = 256
 N_HEADS     = 8
 N_LAYERS    = 6
 DROPOUT     = 0.1
-LR          = 5e-4
+LR          = 1e-5
 EPOCHS      = 500
 BATCH_SIZE  = 1024
 CANVAS_SIZE = (224, 224)
@@ -212,14 +212,15 @@ def cfm_loss(cfm_head, h, a_tar, K=CFM_K, alpha=CFM_ALPHA, delta_t=CFM_DELTA_T):
     a_tar : (B, STROKE_DIM) — 目标动作 a1
     """
     B, device = h.shape[0], h.device
+    h = h.detach()  # 梯度只走cfm_head，不回传到Transformer
     a_src = torch.randn_like(a_tar)   # a0 ~ N(0,I)
 
-    total_loss = torch.tensor(0.0, device=device)
+    losses = []
 
     # 段权重：中间段更难，给更大权重
     seg_weights = []
     for i in range(K):
-        w = 1.0 + float(i == K // 2)   # 简单策略：中间段权重×2
+        w = 1.0 + float(i == K // 2)
         seg_weights.append(w)
 
     for i in range(K):
@@ -236,23 +237,26 @@ def cfm_loss(cfm_head, h, a_tar, K=CFM_K, alpha=CFM_ALPHA, delta_t=CFM_DELTA_T):
 
         # 预测速度（当前参数 θ）
         v_t      = cfm_head(h, at,      t_val)
-        v_t_next = cfm_head(h, at_next, t_next)
+
+        # EMA参数预测（stop gradient）
+        with torch.no_grad():
+            v_t_next = cfm_head(h, at_next, t_next)
 
         # 预测终点 f^i_θ(t, at) = at + ((i+1)/K - t) * v
         seg_end = (i + 1) / K
         f_t      = at      + (seg_end - t_val)  * v_t
         f_t_next = at_next + (seg_end - t_next) * v_t_next
 
-        # 一致性损失：两个时间点预测的终点应该相同
-        loss_consistency = F.mse_loss(f_t, f_t_next.detach())
+        # 一致性损失
+        loss_consistency = F.mse_loss(f_t, f_t_next)
 
         # 速度一致性损失
-        loss_velocity = F.mse_loss(v_t, v_t_next.detach())
+        loss_velocity = F.mse_loss(v_t, v_t_next)
 
         lam = seg_weights[i]
-        total_loss = total_loss + lam * (loss_consistency + alpha * loss_velocity)
+        losses.append(lam * (loss_consistency + alpha * loss_velocity))
 
-    return total_loss / K
+    return sum(losses) / K
 
 
 # ── Stroke AR Model（主模型）─────────────────────────
